@@ -1,7 +1,7 @@
 # ComfyUI-Prompt-Extractor-Gallery
 Lets you browse images in a folder, select one, then it will attempt to extract the prompt used to generate that image from the image metadata and output it as a string.
 
-![Prompt Extractor Gallery](examples/example.png)
+![Prompt Extractor Gallery](example/example.png)
 
 ### Gravity Gallery Prompt Extractor Node Walkthrough
 The Gravity Gallery Node is a custom ComfyUI node that allows you to browse images from a local directory, view them in a grid, and extract their prompts/workflows for use in your current graph.
