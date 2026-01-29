@@ -24,3 +24,8 @@ The Gravity Gallery Node is a custom ComfyUI node that allows you to browse imag
   * Click an image to select it.
 * **Connect**:
   * Connect prompt_string to a CLIP Text Encode or checking node to use the extracted prompt.
+
+### Installation
+* git clone to your ../custom_nodes directory in comfyui
+
+I have no idea how to get something into comfyui manager.
