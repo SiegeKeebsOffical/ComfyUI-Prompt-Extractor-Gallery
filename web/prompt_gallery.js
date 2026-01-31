@@ -76,6 +76,11 @@ app.registerExtension({
                 const galleryDiv = document.createElement("div");
                 galleryDiv.className = "gravity-gallery-container";
                 document.body.appendChild(galleryDiv);
+                
+                // Initialize off-screen to prevent ghost nodes (e.g. from clipboard copies)
+                // from blocking the screen at (0,0) since onDrawForeground won't run for them.
+                galleryDiv.style.top = "-9000px";
+                galleryDiv.style.left = "-9000px";
 
                 // Track state
                 let currentFiles = [];
