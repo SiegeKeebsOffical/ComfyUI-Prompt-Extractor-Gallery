@@ -16,6 +16,8 @@ style.textContent = `
         box-sizing: border-box;
         z-index: 1000;
         pointer-events: auto; /* Enable clicks */
+        max-width: 90vw;
+        max-height: 90vh;
     }
     .gravity-gallery-item {
         width: 100%;
@@ -76,20 +78,17 @@ app.registerExtension({
                 const galleryDiv = document.createElement("div");
                 galleryDiv.className = "gravity-gallery-container";
                 document.body.appendChild(galleryDiv);
-                
-                // Initialize off-screen to prevent ghost nodes (e.g. from clipboard copies)
-                // from blocking the screen at (0,0) since onDrawForeground won't run for them.
-                galleryDiv.style.top = "-9000px";
-                galleryDiv.style.left = "-9000px";
 
                 // Track state
                 let currentFiles = [];
                 let selectedFile = imageWidget.value || "";
+                let isAlive = true;
 
                 // Cleanup on removal
-                const onRemoved = node.onRemoved;
+                const originalOnRemoved = node.onRemoved;
                 node.onRemoved = function () {
-                    if (onRemoved) onRemoved.apply(this, arguments);
+                    isAlive = false;
+                    if (originalOnRemoved) originalOnRemoved.apply(this, arguments);
                     if (galleryDiv.parentNode) galleryDiv.parentNode.removeChild(galleryDiv);
                 };
 
@@ -115,11 +114,13 @@ app.registerExtension({
                         galleryDiv.style.display = "flex";
                         galleryDiv.style.alignItems = "center";
                         galleryDiv.style.justifyContent = "center";
+                        galleryDiv.dataset.error = "true";
                         return;
                     }
 
                     // Reset display style from flex (error msg) back to grid
                     galleryDiv.style.display = "grid";
+                    galleryDiv.dataset.error = "false";
                     galleryDiv.style.alignItems = "initial";
                     galleryDiv.style.justifyContent = "initial";
                     updateGridSize(); // Ensure size is applied
@@ -166,87 +167,81 @@ app.registerExtension({
                     }
                 };
 
-                // Sync loop for position
-                const onDrawForeground = node.onDrawForeground;
-                node.onDrawForeground = function (ctx) {
-                    if (onDrawForeground) onDrawForeground.apply(this, arguments);
+                const syncGallery = () => {
+                    if (!isAlive || !galleryDiv) return;
 
-                    if (!galleryDiv) return;
+                    // Visibility checks
+                    const isTabVisible = document.visibilityState === "visible";
+                    const isCorrectGraph = (node.graph === app.graph);
+                    const isCollapsed = !!node.flags.collapsed;
+                    const isHidden = !!node.flags.hidden;
 
-                    // Hide if node is collapsed or off-screen checks (simplified)
-                    if (node.flags.collapsed) {
-                        galleryDiv.style.display = "none";
-                        return;
-                    } else if (galleryDiv.style.display === "none") {
-                        galleryDiv.style.display = "grid"; // Restore
-                    }
-
-                    // Calculate position
-                    // Local node coords: (0, 0) is top-left of node
-                    // We want to place the gallery below the inputs.
-                    // Let's assume a margin from top.
-                    const headerHeight = 30; // approx
-                    const inputHeight = 60; // 2 inputs roughly
-                    const marginY = 80; // Start below buttons
-
-                    // Calculate Global Coordinates
-                    // ctx.getTransform() gives the full transform matrix?
-                    // Safer to use app.canvas.ds
-
+                    // Basic bounding box check - is the node at least partially on screen?
                     const ds = app.canvas.ds;
                     const scale = ds.scale;
                     const offset = ds.offset;
 
-                    // Node Position (Canvas Space)
                     const nx = node.pos[0];
                     const ny = node.pos[1];
                     const nw = node.size[0];
                     const nh = node.size[1];
 
-                    // Screen Space
-                    const x = (nx + offset[0]) * scale;
-                    const y = (ny + offset[1]) * scale;
-                    // Width/Height
-                    const w = nw * scale;
-                    const h = nh * scale;
+                    // Screen coordinates of node
+                    const screenX = (nx + offset[0]) * scale;
+                    const screenY = (ny + offset[1]) * scale;
+                    const screenW = nw * scale;
+                    const screenH = nh * scale;
 
-                    // Gallery specific area
-                    // We want it to fill the bottom part of the node
-                    const galleryYRel = 180; // Pixel offset inside node for gallery start
-                    const galleryY = y + (galleryYRel * scale);
-                    const galleryH = h - (galleryYRel * scale) - (10 * scale); // 10px padding bottom
-                    const galleryW = w - (20 * scale); // 10px padding sides
+                    const isOffScreen =
+                        screenX + screenW < 0 ||
+                        screenY + screenH < 0 ||
+                        screenX > window.innerWidth ||
+                        screenY > window.innerHeight;
 
-                    galleryDiv.style.left = `${x + 10 * scale}px`;
+                    if (!isTabVisible || !isCorrectGraph || isCollapsed || isHidden || isOffScreen || scale < 0.1) {
+                        if (galleryDiv.style.display !== "none") {
+                            galleryDiv.style.display = "none";
+                        }
+                        requestAnimationFrame(syncGallery);
+                        return;
+                    }
+
+                    // Restore display based on state (error or grid)
+                    const targetDisplay = (galleryDiv.dataset.error === "true") ? "flex" : "grid";
+                    if (galleryDiv.style.display !== targetDisplay) {
+                        galleryDiv.style.display = targetDisplay;
+                    }
+
+                    // Gallery specific area - Pixel offset inside node for gallery start
+                    const galleryYRel = 180;
+
+                    // Sanity check dimensions - prevent absurdly large values
+                    const galleryY = screenY + (galleryYRel * scale);
+                    const galleryH = Math.max(0, screenH - (galleryYRel * scale) - (10 * scale));
+                    const galleryW = Math.max(0, screenW - (20 * scale));
+
+                    // Final safety clamp for overlay
+                    if (galleryW < 10 || galleryH < 10) {
+                        galleryDiv.style.display = "none";
+                        requestAnimationFrame(syncGallery);
+                        return;
+                    }
+
+                    galleryDiv.style.left = `${screenX + 10 * scale}px`;
                     galleryDiv.style.top = `${galleryY}px`;
                     galleryDiv.style.width = `${galleryW}px`;
                     galleryDiv.style.height = `${galleryH}px`;
 
                     // Update grid columns based on zoom (scale)
-                    // We want the columns to be "sizeWidget.value" in NODE coordinates.
-                    // So in screen coordinates, that is sizeWidget.value * scale.
                     const baseSize = sizeWidget.value || 100;
                     const scaledSize = baseSize * scale;
-                    galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${scaledSize}px, 1fr))`;
+                    galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${Math.max(20, scaledSize)}px, 1fr))`;
 
-                    // Font size / scaling?
-                    // We might not need to scale content via transform, just sizing the div is often enough 
-                    // provided scrollbars work. But images might look small if zoomed out.
-                    // HTML overlays usually stay 1:1 pixel ratio unless we scale them.
-                    // Ideally we apply a transform scale to key it in sync with UI zoom?
-                    // Actually, simple sizing is usually better for usability (UI doesn't get microscopic)
-                    // BUT for "in-node" feel, it should scale.
-                    // Let's try simple transform-origin top-left scaling.
-
-                    // Approach: Set internal width/height to unscaled, then transform?
-                    // Or just let natural DOM layout handle it.
-                    // If we just set px width/height, the scrollbar stays constant px size (good).
-                    // But images will be constant px size (bad if drilled in).
-                    // Let's rely on standard browser checks.
-
-                    // Actually, if we zoom out, the 'w' gets smaller. Grid items reflow.
-                    // That's actually often Desirable for a gallery (responsive).
+                    requestAnimationFrame(syncGallery);
                 };
+
+                // Start the loop
+                syncGallery();
 
                 // Listeners
 
