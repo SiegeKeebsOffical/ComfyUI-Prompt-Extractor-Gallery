@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from PIL import Image, ExifTags
 import folder_paths
 
@@ -14,6 +15,8 @@ class GravityGalleryNode:
                 "directory": ("STRING", {"default": ""}),
                 "thumbnail_size": ("INT", {"default": 190, "min": 50, "max": 500, "step": 10}),
                 "image": ([""],),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "randomize_output": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -71,13 +74,34 @@ class GravityGalleryNode:
             
         return str(val)
 
-    def process(self, directory, image, thumbnail_size=100):
-        if not directory or not image:
-            return ("", "No image data")
+    def process(self, directory, image, thumbnail_size=100, seed=0, randomize_output=False):
+        return self._process_logic(directory, image, seed, randomize_output)
+
+    def _process_logic(self, directory, image, seed, randomize_output):
+        if not directory:
+            return ("", "No directory provided")
             
         selected_image = image
         if isinstance(selected_image, (list, tuple)):
-            selected_image = selected_image[0]
+            if len(selected_image) > 0:
+                selected_image = selected_image[0]
+            else:
+                selected_image = ""
+
+        if randomize_output:
+            if os.path.isdir(directory):
+                files = [f for f in os.listdir(directory) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp'))]
+                if files:
+                    files.sort()
+                    r = random.Random(seed)
+                    selected_image = r.choice(files)
+                else:
+                    return ("", f"No images found in {directory}")
+            else:
+                return ("", f"Directory not found: {directory}")
+
+        if not selected_image:
+            return ("", "No image selected")
 
         image_path = os.path.join(directory, selected_image)
 
@@ -254,10 +278,61 @@ class GravityGalleryNode:
         except Exception as e:
             return (f"Error reading image: {e}", f"Exception: {str(e)}")
 
+
+class GravityGalleryConfig:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "directory": ("STRING", {"default": ""}),
+                "thumbnail_size": ("INT", {"default": 190, "min": 50, "max": 500, "step": 10}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "randomize_output": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("GALLERY_CONFIG",)
+    RETURN_NAMES = ("gallery_config",)
+    FUNCTION = "get_config"
+    CATEGORY = "Gravity"
+
+    def get_config(self, directory, thumbnail_size, seed, randomize_output):
+        return ({"directory": directory, "thumbnail_size": thumbnail_size, "seed": seed, "randomize_output": randomize_output},)
+
+class GravityGalleryMini(GravityGalleryNode):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "gallery_config": ("GALLERY_CONFIG",),
+                "image": ([""],),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("prompt_string", "debug_info")
+    FUNCTION = "process_small"
+    CATEGORY = "Gravity"
+
+    @classmethod
+    def VALIDATE_INPUTS(s, gallery_config, image):
+        return True
+
+    def process_small(self, gallery_config, image):
+        directory = gallery_config.get("directory", "")
+        seed = gallery_config.get("seed", 0)
+        randomize_output = gallery_config.get("randomize_output", False)
+        
+        return self._process_logic(directory, image, seed, randomize_output)
+
 NODE_CLASS_MAPPINGS = {
-    "GravityGalleryNode": GravityGalleryNode
+    "GravityGalleryNode": GravityGalleryNode,
+    "GravityGalleryConfig": GravityGalleryConfig,
+    "GravityGalleryMini": GravityGalleryMini
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GravityGalleryNode": "Gravity Gallery Prompt Extractor"
+    "GravityGalleryNode": "Gravity Gallery Prompt Extractor",
+    "GravityGalleryConfig": "Gravity Gallery Config",
+    "GravityGalleryMini": "Gravity Gallery Mini"
 }

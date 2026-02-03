@@ -53,26 +53,54 @@ document.head.appendChild(style);
 app.registerExtension({
     name: "Gravity.Gallery",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "GravityGalleryNode") {
+        if (nodeData.name === "GravityGalleryNode" || nodeData.name === "GravityGalleryMini") {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
 
             nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
 
-                console.log("Gravity Gallery Node created");
+                console.log(`Gravity Gallery Node (${nodeData.name}) created`);
 
                 const node = this;
-                const dirWidget = node.widgets.find((w) => w.name === "directory");
-                const imageWidget = node.widgets.find((w) => w.name === "image");
-                const sizeWidget = node.widgets.find((w) => w.name === "thumbnail_size");
+                const isMini = nodeData.name === "GravityGalleryMini";
 
-                if (!dirWidget || !imageWidget || !sizeWidget) {
-                    console.error("Gravity Gallery: Could not find directory, image, or size widgets");
+                const getWidget = (name) => node.widgets?.find((w) => w.name === name);
+
+                // Helper to find connected config node
+                const getConfigNode = () => {
+                    const input = node.inputs?.find(i => i.name === "gallery_config");
+                    if (!input || input.link == null) return null;
+                    const link = app.graph.links[input.link];
+                    if (!link) return null;
+                    return app.graph.getNodeById(link.origin_id);
+                };
+
+                // Helper to get value from either local widget or connected config
+                const getConfigValue = (name) => {
+                    if (isMini) {
+                        const configNode = getConfigNode();
+                        if (configNode) {
+                            const w = configNode.widgets?.find(w => w.name === name);
+                            return w ? w.value : null;
+                        }
+                        return null;
+                    }
+                    const w = getWidget(name);
+                    return w ? w.value : null;
+                };
+
+                const imageWidget = getWidget("image");
+                if (!imageWidget) {
+                    console.error("Gravity Gallery: Could not find image widget");
                     return;
                 }
 
                 // Increase default size to accommodate gallery
-                node.setSize([400, 600]);
+                if (!isMini) {
+                    node.setSize([400, 600]);
+                } else {
+                    node.setSize([300, 400]);
+                }
 
                 // Create DOM Element
                 const galleryDiv = document.createElement("div");
@@ -99,17 +127,17 @@ app.registerExtension({
 
                 // Update Grid Size
                 const updateGridSize = () => {
-                    const size = sizeWidget.value || 100;
+                    const size = getConfigValue("thumbnail_size") || 100;
                     galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${size}px, 1fr))`;
                 }
 
                 // Update Gallery Content
                 const renderGallery = () => {
                     galleryDiv.innerHTML = "";
-                    const dir = dirWidget.value;
+                    const dir = getConfigValue("directory");
 
                     if (!dir) {
-                        galleryDiv.innerText = "No directory selected";
+                        galleryDiv.innerText = isMini ? "Connect Config Node" : "No directory selected";
                         galleryDiv.style.color = "#888";
                         galleryDiv.style.display = "flex";
                         galleryDiv.style.alignItems = "center";
@@ -149,7 +177,7 @@ app.registerExtension({
                 };
 
                 const updateImageList = async () => {
-                    const dir = dirWidget.value;
+                    const dir = getConfigValue("directory");
                     if (!dir) return;
 
                     try {
@@ -213,7 +241,8 @@ app.registerExtension({
                     }
 
                     // Gallery specific area - Pixel offset inside node for gallery start
-                    const galleryYRel = 180;
+                    // Mini node has fewer widgets, so move gallery up
+                    const galleryYRel = isMini ? 120 : 240;
 
                     // Sanity check dimensions - prevent absurdly large values
                     const galleryY = screenY + (galleryYRel * scale);
@@ -233,7 +262,7 @@ app.registerExtension({
                     galleryDiv.style.height = `${galleryH}px`;
 
                     // Update grid columns based on zoom (scale)
-                    const baseSize = sizeWidget.value || 100;
+                    const baseSize = getConfigValue("thumbnail_size") || 100;
                     const scaledSize = baseSize * scale;
                     galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${Math.max(20, scaledSize)}px, 1fr))`;
 
@@ -245,24 +274,28 @@ app.registerExtension({
 
                 // Listeners
 
-                // Hijack callback of directory to update list
-                const originalDirCallback = dirWidget.callback;
-                dirWidget.callback = function () {
-                    if (originalDirCallback) originalDirCallback.apply(this, arguments);
-                    updateImageList();
-                };
+                if (!isMini) {
+                    // Hijack callback of directory to update list
+                    const dirWidget = getWidget("directory");
+                    const originalDirCallback = dirWidget.callback;
+                    dirWidget.callback = function () {
+                        if (originalDirCallback) originalDirCallback.apply(this, arguments);
+                        updateImageList();
+                    };
 
-                // Hijack callback of size widget to trigger redraw
-                const originalSizeCallback = sizeWidget.callback;
-                sizeWidget.callback = function () {
-                    if (originalSizeCallback) originalSizeCallback.apply(this, arguments);
-                    // Force a redraw so scale is re-applied
-                    app.graph.setDirtyCanvas(true);
-                };
+                    // Hijack callback of size widget to trigger redraw
+                    const sizeWidget = getWidget("thumbnail_size");
+                    const originalSizeCallback = sizeWidget.callback;
+                    sizeWidget.callback = function () {
+                        if (originalSizeCallback) originalSizeCallback.apply(this, arguments);
+                        app.graph.setDirtyCanvas(true);
+                    };
+                }
 
                 // Initial update
                 setTimeout(() => {
-                    if (dirWidget.value) {
+                    const dir = getConfigValue("directory");
+                    if (dir) {
                         updateImageList();
                     }
                 }, 100);
