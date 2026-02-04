@@ -47,6 +47,62 @@ style.textContent = `
         background: #444;
         border-radius: 4px;
     }
+    .gravity-gallery-item-wrapper {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1;
+    }
+    .gravity-gallery-item-rating {
+        position: absolute;
+        bottom: 4px;
+        left: 4px;
+        background: rgba(0,0,0,0.7);
+        color: #ffca28;
+        font-size: 10px;
+        padding: 0 4px;
+        border-radius: 2px;
+        pointer-events: none;
+    }
+    .gravity-gallery-controls {
+        position: sticky;
+        top: 0;
+        background: #111;
+        padding: 4px;
+        margin-bottom: 4px;
+        border-bottom: 1px solid #333;
+        display: flex;
+        gap: 4px;
+        z-index: 10;
+        align-items: center;
+    }
+    .gravity-gallery-controls select {
+        background: #222;
+        color: white;
+        border: 1px solid #444;
+        font-size: 10px;
+        padding: 2px;
+    }
+    .gravity-gallery-controls button {
+        background: #333;
+        color: white;
+        border: 1px solid #444;
+        font-size: 10px;
+        padding: 2px 6px;
+        cursor: pointer;
+        transition: background 0.2s, border-color 0.2s;
+    }
+    .gravity-gallery-controls button:hover {
+        background: #444;
+        border-color: #555;
+    }
+    .gravity-gallery-controls .sort-direction-btn {
+        font-size: 14px;
+        padding: 0px 6px;
+        min-width: 24px;
+    }
+    .gravity-gallery-controls .sort-direction-btn:active {
+        background: #555;
+    }
 `;
 document.head.appendChild(style);
 
@@ -108,8 +164,10 @@ app.registerExtension({
                 document.body.appendChild(galleryDiv);
 
                 // Track state
-                let currentFiles = [];
+                let currentFiles = []; // Array of {filename, rating, mtime}
                 let selectedFile = imageWidget.value || "";
+                let currentSort = "mtime";
+                let sortAscending = false; // false = descending (newest/highest first)
                 let isAlive = true;
 
                 // Cleanup on removal
@@ -153,7 +211,41 @@ app.registerExtension({
                     galleryDiv.style.justifyContent = "initial";
                     updateGridSize(); // Ensure size is applied
 
-                    currentFiles.forEach(f => {
+                    // Add Controls
+                    const controls = document.createElement("div");
+                    controls.className = "gravity-gallery-controls";
+                    controls.innerHTML = `
+                        <select class="sort-select">
+                            <option value="mtime">Date</option>
+                            <option value="rating">Rating</option>
+                            <option value="filename">Name</option>
+                        </select>
+                        <button class="sort-direction-btn" title="Toggle sort direction">${sortAscending ? '↑' : '↓'}</button>
+                    `;
+                    const select = controls.querySelector(".sort-select");
+                    select.value = currentSort;
+                    select.onchange = (e) => {
+                        currentSort = e.target.value;
+                        sortAndRender();
+                    };
+
+                    const directionBtn = controls.querySelector(".sort-direction-btn");
+                    directionBtn.onclick = () => {
+                        sortAscending = !sortAscending;
+                        directionBtn.textContent = sortAscending ? '↑' : '↓';
+                        directionBtn.title = sortAscending ? 'Ascending' : 'Descending';
+                        sortAndRender();
+                    };
+
+                    galleryDiv.appendChild(controls);
+
+                    currentFiles.forEach(fileData => {
+                        const f = fileData.filename;
+                        const rating = fileData.rating || 0;
+
+                        const wrapper = document.createElement("div");
+                        wrapper.className = "gravity-gallery-item-wrapper";
+
                         const img = document.createElement("img");
                         img.src = `/gravity/gallery/view?directory=${encodeURIComponent(dir)}&filename=${encodeURIComponent(f)}`;
                         img.className = "gravity-gallery-item";
@@ -165,15 +257,41 @@ app.registerExtension({
                             imageWidget.value = f;
 
                             // Visual update
-                            Array.from(galleryDiv.children).forEach(c => c.classList.remove("selected"));
+                            Array.from(galleryDiv.querySelectorAll(".gravity-gallery-item")).forEach(c => c.classList.remove("selected"));
                             img.classList.add("selected");
 
                             // Trigger callback if needed
                             if (imageWidget.callback) imageWidget.callback(f);
                         };
 
-                        galleryDiv.appendChild(img);
+                        wrapper.appendChild(img);
+
+                        if (rating > 0) {
+                            const ratingTag = document.createElement("div");
+                            ratingTag.className = "gravity-gallery-item-rating";
+                            ratingTag.innerText = "★ " + rating.toFixed(1);
+                            wrapper.appendChild(ratingTag);
+                        }
+
+                        galleryDiv.appendChild(wrapper);
                     });
+                };
+
+                const sortAndRender = () => {
+                    if (currentSort === "mtime") {
+                        currentFiles.sort((a, b) => sortAscending ? a.mtime - b.mtime : b.mtime - a.mtime);
+                    } else if (currentSort === "rating") {
+                        currentFiles.sort((a, b) => {
+                            const ratingDiff = sortAscending ? a.rating - b.rating : b.rating - a.rating;
+                            return ratingDiff !== 0 ? ratingDiff : b.mtime - a.mtime; // Secondary sort by newest
+                        });
+                    } else if (currentSort === "filename") {
+                        currentFiles.sort((a, b) => {
+                            const cmp = a.filename.localeCompare(b.filename);
+                            return sortAscending ? cmp : -cmp;
+                        });
+                    }
+                    renderGallery();
                 };
 
                 const updateImageList = async () => {
@@ -186,8 +304,8 @@ app.registerExtension({
 
                         if (data.files) {
                             currentFiles = data.files;
-                            imageWidget.options.values = data.files;
-                            renderGallery();
+                            imageWidget.options.values = data.files.map(f => typeof f === 'string' ? f : f.filename);
+                            sortAndRender();
                         }
                     } catch (e) {
                         console.error("Error fetching gallery list", e);

@@ -74,6 +74,36 @@ class GravityGalleryNode:
             
         return str(val)
 
+    def extract_positive_prompt(self, parameters_text):
+        """
+        Extract only the positive prompt from A1111/Civitai parameters text.
+        Stops extraction when hitting any metadata phrase.
+        """
+        # Define the phrases that mark the end of the positive prompt
+        stop_phrases = [
+            "Negative prompt:",
+            "Steps:",
+            "Sampler:",
+            "CFG scale:",
+            "Seed:",
+            "Size:",
+            "Clip skip:",
+            "Created Date:",
+            "Civitai resources:",
+            "Civitai metadata:"
+        ]
+        
+        # Find the earliest occurrence of any stop phrase
+        earliest_index = len(parameters_text)
+        for phrase in stop_phrases:
+            index = parameters_text.find(phrase)
+            if index != -1 and index < earliest_index:
+                earliest_index = index
+        
+        # Extract everything before the first stop phrase
+        prompt = parameters_text[:earliest_index].strip()
+        return prompt
+
     def process(self, directory, image, thumbnail_size=100, seed=0, randomize_output=False):
         return self._process_logic(directory, image, seed, randomize_output)
 
@@ -123,97 +153,166 @@ class GravityGalleryNode:
                 try:
                     exif = img.getexif()
                     if exif:
+                        # Get EXIF IFD (sub-directory) which contains UserComment
+                        exif_ifd = exif.get_ifd(0x8769)  # 0x8769 is the EXIF IFD pointer
+                        
                         # Priority list: (Tag ID, Name, Target Key)
-                        # We process them in order so later ones can overwrite if needed, or we check if empty.
-                        # Actually, better to check all and populate what's missing.
+                        # Main IFD tags
                         target_tags = {
                             270: "ImageDescription", 
                             271: "Make", 
                             0x0110: "Model", 
-                            0x8298: "Copyright", 
+                            0x8298: "Copyright"
+                        }
+                        
+                        # EXIF IFD tags (including UserComment)
+                        exif_ifd_tags = {
                             0x9286: "UserComment"
                         }
                         
-                        for key, val in exif.items():
-                            if key in target_tags:
-                                tag_name = target_tags[key]
-                                
-                                # Decode Bytes
-                                val_str = ""
-                                if isinstance(val, bytes):
-                                    try:
-                                        if val.startswith(b'ASCII\0\0\0'):
-                                            val_str = val[8:].decode('utf-8')
-                                        elif val.startswith(b'UNICODE\0'):
-                                            val_str = val[8:].decode('utf-16')
-                                        elif val.startswith(b'Exif\0\0'):
-                                            val_str = val[6:].decode('utf-8')
-                                        else:
-                                            val_str = val.decode('utf-8', errors='ignore').replace('\x00', '')
-                                    except:
-                                        val_str = str(val)
-                                else:
-                                    val_str = str(val)
-                                
-                                debug_log.append(f"Exif {tag_name} found. Length: {len(val_str)}")
-                                
-                                # Remove "Workflow:" or "Prompt:" prefixes
-                                if val_str.startswith("Workflow:"):
-                                    val_str = val_str[9:].strip()
-                                elif val_str.startswith("Prompt:"):
-                                    val_str = val_str[7:].strip()
-                                
-                                # Attempt JSON Parse
+                        debug_log.append(f"Main EXIF tags found: {list(exif.keys())}")
+                        if exif_ifd:
+                            debug_log.append(f"EXIF IFD tags found: {list(exif_ifd.keys())}")
+                        
+                        # Process both main EXIF and EXIF IFD tags
+                        all_tags = [(key, val, target_tags[key]) for key, val in exif.items() if key in target_tags]
+                        if exif_ifd:
+                            all_tags.extend([(key, val, exif_ifd_tags[key]) for key, val in exif_ifd.items() if key in exif_ifd_tags])
+                        
+                        for key, val, tag_name in all_tags:
+                            # Decode Bytes
+                            val_str = ""
+                            if isinstance(val, bytes):
                                 try:
-                                    potential_json = json.loads(val_str)
-                                    if isinstance(potential_json, dict):
-                                        # Strategy: Populate generic keys if found in JSON
-                                        # But also respect the tag's semantic meaning
-                                        
-                                        # If JSON explicitly has "prompt" or "workflow" keys, use them.
-                                        if "prompt" in potential_json:
-                                            info["prompt"] = json.dumps(potential_json["prompt"])
-                                            debug_log.append(f"  -> Found 'prompt' key inside {tag_name}")
-                                        if "workflow" in potential_json:
-                                            info["workflow"] = json.dumps(potential_json["workflow"])
-                                            debug_log.append(f"  -> Found 'workflow' key inside {tag_name}")
-                                        
-                                        # If the tag is strictly "Make" or "Model", and the JSON looks like a node map
-                                        # (keys are IDs), assume it is the PROMPT
-                                        if tag_name in ["Make", "Model"]:
-                                            # Verification it looks like a prompt map
-                                            is_node_map = True
-                                            if len(potential_json) > 0:
-                                                 for k, v in potential_json.items():
-                                                     if not isinstance(v, dict) or "inputs" not in v:
-                                                         is_node_map = False
-                                                         break
-                                            
-                                            if is_node_map:
-                                                 if "prompt" not in info: # Don't overwrite if we found explicit "prompt" key earlier
-                                                     info["prompt"] = val_str
-                                                     debug_log.append(f"  -> Used {tag_name} content as 'prompt'")
-
-                                        # If the tag is "ImageDescription", "Copyright", "UserComment" 
-                                        # and contains "nodes" & "links", assume it is the WORKFLOW
-                                        if tag_name in ["ImageDescription", "Copyright", "UserComment"]:
-                                            if "nodes" in potential_json and "links" in potential_json:
-                                                 if "workflow" not in info:
-                                                     info["workflow"] = val_str
-                                                     debug_log.append(f"  -> Used {tag_name} content as 'workflow'")
-                                                     
-                                except json.JSONDecodeError:
+                                    # Handle EXIF UserComment encoding prefixes
+                                    if tag_name == "UserComment":
+                                        # Try UTF-16LE first (common for Civitai UserComment), then UTF-8
+                                        try:
+                                            # Check if it looks like UTF-16LE (every other byte is \x00 for ASCII chars)
+                                            if len(val) > 10 and val[1:20:2].count(b'\x00'[0]) > 5:
+                                                val_str = val.decode('utf-16le', errors='ignore').replace('\x00', '')
+                                            else:
+                                                val_str = val.decode('utf-8', errors='ignore').replace('\x00', '')
+                                        except:
+                                            val_str = val.decode('utf-8', errors='ignore').replace('\x00', '')
+                                    
+                                    elif val.startswith(b'ASCII\0\0\0'):
+                                        val_str = val[8:].decode('utf-8')
+                                    elif val.startswith(b'UNICODE\0'):
+                                        val_str = val[8:].decode('utf-16')
+                                    elif val.startswith(b'Exif\0\0'):
+                                        val_str = val[6:].decode('utf-8')
+                                    
+                                except:
+                                    val_str = str(val)
+                            else:
+                                val_str = str(val)
+                            
+                            debug_log.append(f"Exif {tag_name} found. Length: {len(val_str)}")
+                            
+                            # Special handling for UserComment - extract only the positive prompt
+                            if tag_name == "UserComment":
+                                # Remove EXIF encoding marker prefixes if present
+                                for prefix in ['UNICODE', 'ASCII', 'JIS', 'UNDEFINED']:
+                                    if val_str.startswith(prefix):
+                                        val_str = val_str[len(prefix):].lstrip()
+                                        debug_log.append(f"  -> Stripped '{prefix}' prefix from UserComment")
+                                        break
+                                
+                                debug_log.append(f"  -> UserComment raw content: {val_str[:100]}...")
+                                
+                                # Try to parse as JSON (for newer Civitai format with extraMetadata)
+                                extracted_prompt = None
+                                try:
+                                    usercomment_json = json.loads(val_str)
+                                    if isinstance(usercomment_json, dict):
+                                        # Check for extraMetadata field (newer Civitai format)
+                                        if "extraMetadata" in usercomment_json:
+                                            extra_meta_str = usercomment_json["extraMetadata"]
+                                            # Parse the nested JSON string
+                                            extra_meta = json.loads(extra_meta_str)
+                                            if "prompt" in extra_meta:
+                                                extracted_prompt = extra_meta["prompt"]
+                                                debug_log.append(f"  -> Extracted prompt from extraMetadata.prompt")
+                                except (json.JSONDecodeError, TypeError):
+                                    # Not JSON, treat as plain text
                                     pass
+                                
+                                # If we didn't find JSON prompt, extract from plain text
+                                if not extracted_prompt:
+                                    extracted_prompt = self.extract_positive_prompt(val_str)
+                                
+                                if extracted_prompt:
+                                    info["usercomment_prompt"] = extracted_prompt
+                                    debug_log.append(f"  -> Extracted prompt from UserComment: {len(extracted_prompt)} chars")
+                                continue
+                            
+                            # Remove "Workflow:" or "Prompt:" prefixes
+                            if val_str.startswith("Workflow:"):
+                                val_str = val_str[9:].strip()
+                            elif val_str.startswith("Prompt:"):
+                                val_str = val_str[7:].strip()
+                            
+                            # Attempt JSON Parse
+                            try:
+                                potential_json = json.loads(val_str)
+                                if isinstance(potential_json, dict):
+                                    # Strategy: Populate generic keys if found in JSON
+                                    # But also respect the tag's semantic meaning
+                                    
+                                    # If JSON explicitly has "prompt" or "workflow" keys, use them.
+                                    if "prompt" in potential_json:
+                                        info["prompt"] = json.dumps(potential_json["prompt"])
+                                        debug_log.append(f"  -> Found 'prompt' key inside {tag_name}")
+                                    if "workflow" in potential_json:
+                                        info["workflow"] = json.dumps(potential_json["workflow"])
+                                        debug_log.append(f"  -> Found 'workflow' key inside {tag_name}")
+                                    
+                                    # If the tag is strictly "Make" or "Model", and the JSON looks like a node map
+                                    # (keys are IDs), assume it is the PROMPT
+                                    if tag_name in ["Make", "Model"]:
+                                        # Verification it looks like a prompt map
+                                        is_node_map = True
+                                        if len(potential_json) > 0:
+                                             for k, v in potential_json.items():
+                                                 if not isinstance(v, dict) or "inputs" not in v:
+                                                     is_node_map = False
+                                                     break
+                                        
+                                        if is_node_map:
+                                             if "prompt" not in info: # Don't overwrite if we found explicit "prompt" key earlier
+                                                 info["prompt"] = val_str
+                                                 debug_log.append(f"  -> Used {tag_name} content as 'prompt'")
+
+                                    # If the tag is "ImageDescription", "Copyright"
+                                    # and contains "nodes" & "links", assume it is the WORKFLOW
+                                    if tag_name in ["ImageDescription", "Copyright"]:
+                                        if "nodes" in potential_json and "links" in potential_json:
+                                             if "workflow" not in info:
+                                                 info["workflow"] = val_str
+                                                 debug_log.append(f"  -> Used {tag_name} content as 'workflow'")
+                                                 
+                            except json.JSONDecodeError:
+                                pass
 
                 except Exception as ex:
                     debug_log.append(f"Error reading Exif: {ex}")
 
                 text_output = ""
                 
+                # 0. Try UserComment first (Civitai images)
+                if "usercomment_prompt" in info:
+                    debug_log.append("Found extracted prompt from UserComment (Civitai format).")
+                    text_output += f"{info['usercomment_prompt']}\n"
+                    return (text_output, "\n".join(debug_log))
+                
                 # 1. Try Automatic1111 "parameters"
                 if "parameters" in info:
                     debug_log.append("Found 'parameters' in metadata (A1111 format).")
-                    text_output += f"{info['parameters']}\n"
+                    # Extract only the positive prompt by stopping at metadata phrases
+                    extracted_prompt = self.extract_positive_prompt(info['parameters'])
+                    text_output += f"{extracted_prompt}\n"
+                    debug_log.append(f"Extracted prompt length: {len(extracted_prompt)} chars")
                     return (text_output, "\n".join(debug_log))
 
                 # 2. Try ComfyUI "prompt"
