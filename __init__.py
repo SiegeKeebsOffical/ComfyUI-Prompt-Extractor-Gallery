@@ -7,6 +7,8 @@ from aiohttp import web
 # It might fail if running in a standalone test environment, which is fine for basic node testing but required for full functionality.
 try:
     from server import PromptServer
+    from PIL import Image
+    from io import BytesIO
     
     routes = PromptServer.instance.routes
 
@@ -47,6 +49,37 @@ try:
             
         # Security check: straightforward implementation for local tool
         return web.FileResponse(file_path)
+
+    @routes.get("/gravity/gallery/thumbnail")
+    async def view_gallery_thumbnail(request):
+        dir_path = request.rel_url.query.get("directory", "")
+        filename = request.rel_url.query.get("filename", "")
+        size = int(request.rel_url.query.get("size", "256"))
+        
+        if not dir_path or not filename:
+             return web.Response(status=400, text="Missing directory or filename")
+             
+        file_path = os.path.join(dir_path, filename)
+        if not os.path.exists(file_path):
+            return web.Response(status=404, text="File not found")
+            
+        try:
+            img = Image.open(file_path)
+            img.thumbnail((size, size))
+            
+            # Convert to RGB if necessary (e.g. for RGBA PNGs saving as JPEG)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+                
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=70)
+            buffer.seek(0)
+            
+            return web.Response(body=buffer.read(), content_type="image/jpeg")
+        except Exception as e:
+             print(f"Error generating thumbnail for {filename}: {e}")
+             return web.FileResponse(file_path) # Fallback to full image
+
 
 except ImportError:
     print("ComfyUI Server not found. API routes for Gallery will not be registered.")
