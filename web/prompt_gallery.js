@@ -51,6 +51,8 @@ style.textContent = `
         position: relative;
         width: 100%;
         aspect-ratio: 1;
+        content-visibility: auto; 
+        contain-intrinsic-size: 100px;
     }
     .gravity-gallery-item-rating {
         position: absolute;
@@ -183,14 +185,102 @@ app.registerExtension({
                     updateImageList();
                 });
 
-                // Update Grid Size
-                const updateGridSize = () => {
-                    const size = getConfigValue("thumbnail_size") || 100;
-                    galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${size}px, 1fr))`;
+                // Optimization: Cache and dirty check
+                let lastState = {
+                    scale: 0,
+                    offset: [0, 0],
+                    nx: 0, ny: 0, nw: 0, nh: 0,
+                    isCollapsed: false,
+                    isHidden: false,
+                    display: "",
+                    galleryYRel: 0,
+                    thumbnailSize: 100,
+                    dir: "",
+                    tabVisible: true
+                };
+
+                const updateGridSize = (size) => {
+                    if (galleryDiv) {
+                        galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${size}px, 1fr))`;
+                    }
                 }
+
+                // Optimization: Virtualization / Infinite Scroll
+                const BATCH_SIZE = 50;
+                let renderedCount = 0;
+                let observer = null;
+                let sentinel = null;
+
+                // CSS Optimization for items
+                const itemStyle = `
+                    contain: content;
+                    content-visibility: auto;
+                    contain-intrinsic-size: 100px;
+                `;
+
+                const appendItems = (startIndex, count, dir) => {
+                    const fragment = document.createDocumentFragment();
+                    const limit = Math.min(startIndex + count, currentFiles.length);
+
+                    for (let i = startIndex; i < limit; i++) {
+                        const fileData = currentFiles[i];
+                        const f = fileData.filename;
+                        const rating = fileData.rating || 0;
+
+                        const wrapper = document.createElement("div");
+                        wrapper.className = "gravity-gallery-item-wrapper";
+                        // wrapper.style.cssText = itemStyle; // Apply CSS optimization
+
+                        const img = document.createElement("img");
+                        // Calculate desired size (taking high DPI into account)
+                        // lastState.thumbnailSize might be old, so we rely on CSS, but request a decent size
+                        const requestSize = Math.ceil((lastState.thumbnailSize || 100) * 1.5);
+                        img.dataset.src = `/gravity/gallery/thumbnail?directory=${encodeURIComponent(dir)}&filename=${encodeURIComponent(f)}&size=${requestSize}`;
+                        img.src = img.dataset.src; // Trigger load
+                        img.loading = "lazy"; // Native lazy loading
+                        img.className = "gravity-gallery-item";
+                        if (f === selectedFile) img.classList.add("selected");
+
+                        img.onclick = (e) => {
+                            e.stopPropagation();
+                            selectedFile = f;
+                            imageWidget.value = f;
+
+                            Array.from(galleryDiv.querySelectorAll(".gravity-gallery-item")).forEach(c => c.classList.remove("selected"));
+                            img.classList.add("selected");
+
+                            if (imageWidget.callback) imageWidget.callback(f);
+                        };
+
+                        wrapper.appendChild(img);
+
+                        if (rating > 0) {
+                            const ratingTag = document.createElement("div");
+                            ratingTag.className = "gravity-gallery-item-rating";
+                            ratingTag.innerText = "★ " + rating.toFixed(1);
+                            wrapper.appendChild(ratingTag);
+                        }
+
+                        fragment.appendChild(wrapper);
+                    }
+
+                    if (sentinel && sentinel.parentNode === galleryDiv) {
+                        galleryDiv.insertBefore(fragment, sentinel);
+                    } else {
+                        galleryDiv.appendChild(fragment);
+                    }
+
+                    renderedCount = limit;
+                };
 
                 // Update Gallery Content
                 const renderGallery = () => {
+                    // Cleanup old observer
+                    if (observer) {
+                        observer.disconnect();
+                        observer = null;
+                    }
+
                     galleryDiv.innerHTML = "";
                     const dir = getConfigValue("directory");
 
@@ -204,12 +294,12 @@ app.registerExtension({
                         return;
                     }
 
-                    // Reset display style from flex (error msg) back to grid
+                    // Reset display style
                     galleryDiv.style.display = "grid";
                     galleryDiv.dataset.error = "false";
                     galleryDiv.style.alignItems = "initial";
                     galleryDiv.style.justifyContent = "initial";
-                    updateGridSize(); // Ensure size is applied
+                    updateGridSize(lastState.thumbnailSize);
 
                     // Add Controls
                     const controls = document.createElement("div");
@@ -222,6 +312,8 @@ app.registerExtension({
                         </select>
                         <button class="sort-direction-btn" title="Toggle sort direction">${sortAscending ? '↑' : '↓'}</button>
                     `;
+
+                    // ... (Event handlers for controls - same as before) ...
                     const select = controls.querySelector(".sort-select");
                     select.value = currentSort;
                     select.onchange = (e) => {
@@ -239,42 +331,27 @@ app.registerExtension({
 
                     galleryDiv.appendChild(controls);
 
-                    currentFiles.forEach(fileData => {
-                        const f = fileData.filename;
-                        const rating = fileData.rating || 0;
+                    // Initial Batch Render
+                    renderedCount = 0;
 
-                        const wrapper = document.createElement("div");
-                        wrapper.className = "gravity-gallery-item-wrapper";
+                    // Create Sentinel for Infinite Scroll
+                    sentinel = document.createElement("div");
+                    sentinel.style.width = "100%";
+                    sentinel.style.height = "10px";
+                    sentinel.style.gridColumn = "1 / -1"; // Span all columns
 
-                        const img = document.createElement("img");
-                        img.src = `/gravity/gallery/view?directory=${encodeURIComponent(dir)}&filename=${encodeURIComponent(f)}`;
-                        img.className = "gravity-gallery-item";
-                        if (f === selectedFile) img.classList.add("selected");
+                    // Initial load
+                    appendItems(0, BATCH_SIZE, dir);
+                    galleryDiv.appendChild(sentinel);
 
-                        img.onclick = (e) => {
-                            e.stopPropagation(); // Prevent passing click to canvas
-                            selectedFile = f;
-                            imageWidget.value = f;
-
-                            // Visual update
-                            Array.from(galleryDiv.querySelectorAll(".gravity-gallery-item")).forEach(c => c.classList.remove("selected"));
-                            img.classList.add("selected");
-
-                            // Trigger callback if needed
-                            if (imageWidget.callback) imageWidget.callback(f);
-                        };
-
-                        wrapper.appendChild(img);
-
-                        if (rating > 0) {
-                            const ratingTag = document.createElement("div");
-                            ratingTag.className = "gravity-gallery-item-rating";
-                            ratingTag.innerText = "★ " + rating.toFixed(1);
-                            wrapper.appendChild(ratingTag);
+                    // Setup Observer
+                    observer = new IntersectionObserver((entries) => {
+                        if (entries[0].isIntersecting && renderedCount < currentFiles.length) {
+                            appendItems(renderedCount, BATCH_SIZE, dir);
                         }
+                    }, { root: galleryDiv, rootMargin: "200px" });
 
-                        galleryDiv.appendChild(wrapper);
-                    });
+                    observer.observe(sentinel);
                 };
 
                 const sortAndRender = () => {
@@ -314,15 +391,19 @@ app.registerExtension({
                 };
 
                 const syncGallery = () => {
+                    requestAnimationFrame(syncGallery);
+
                     if (!isAlive || !galleryDiv) return;
 
                     // Visibility checks
                     const isTabVisible = document.visibilityState === "visible";
-                    const isCorrectGraph = (node.graph === app.graph);
-                    const isCollapsed = !!node.flags.collapsed;
-                    const isHidden = !!node.flags.hidden;
+                    // Only check graph connectivity if tab is visible to save resources
+                    if (isTabVisible && node.graph !== app.graph) {
+                        if (galleryDiv.style.display !== "none") galleryDiv.style.display = "none";
+                        return;
+                    }
 
-                    // Basic bounding box check - is the node at least partially on screen?
+                    // Check dirty state of scene
                     const ds = app.canvas.ds;
                     const scale = ds.scale;
                     const offset = ds.offset;
@@ -331,6 +412,45 @@ app.registerExtension({
                     const ny = node.pos[1];
                     const nw = node.size[0];
                     const nh = node.size[1];
+
+                    const isCollapsed = !!node.flags.collapsed;
+                    const isHidden = !!node.flags.hidden;
+
+                    // Optimization: Check if anything changed that affects rendering
+                    // We also periodically (every ~60 frames or 1s) check config values to handle changes not triggered by callbacks
+                    const now = Date.now();
+                    const slowCheck = (now % 1000) < 20; // Crude 1Hz check
+
+                    let thumbnailSize = lastState.thumbnailSize;
+                    if (slowCheck) {
+                        thumbnailSize = getConfigValue("thumbnail_size") || 100;
+                    }
+
+                    const stateChanged =
+                        Math.abs(lastState.scale - scale) > 0.001 ||
+                        Math.abs(lastState.offset[0] - offset[0]) > 0.1 ||
+                        Math.abs(lastState.offset[1] - offset[1]) > 0.1 ||
+                        Math.abs(lastState.nx - nx) > 1 ||
+                        Math.abs(lastState.ny - ny) > 1 ||
+                        Math.abs(lastState.nw - nw) > 1 ||
+                        Math.abs(lastState.nh - nh) > 1 ||
+                        lastState.isCollapsed !== isCollapsed ||
+                        lastState.isHidden !== isHidden ||
+                        lastState.tabVisible !== isTabVisible ||
+                        lastState.thumbnailSize !== thumbnailSize;
+
+                    if (!stateChanged) {
+                        return; // Nothing to do
+                    }
+
+                    // Update State
+                    lastState = {
+                        scale, offset: [offset[0], offset[1]],
+                        nx, ny, nw, nh,
+                        isCollapsed, isHidden,
+                        tabVisible: isTabVisible,
+                        thumbnailSize
+                    };
 
                     // Screen coordinates of node
                     const screenX = (nx + offset[0]) * scale;
@@ -344,11 +464,10 @@ app.registerExtension({
                         screenX > window.innerWidth ||
                         screenY > window.innerHeight;
 
-                    if (!isTabVisible || !isCorrectGraph || isCollapsed || isHidden || isOffScreen || scale < 0.1) {
+                    if (!isTabVisible || isCollapsed || isHidden || isOffScreen || scale < 0.1) {
                         if (galleryDiv.style.display !== "none") {
                             galleryDiv.style.display = "none";
                         }
-                        requestAnimationFrame(syncGallery);
                         return;
                     }
 
@@ -369,8 +488,7 @@ app.registerExtension({
 
                     // Final safety clamp for overlay
                     if (galleryW < 10 || galleryH < 10) {
-                        galleryDiv.style.display = "none";
-                        requestAnimationFrame(syncGallery);
+                        if (galleryDiv.style.display !== "none") galleryDiv.style.display = "none";
                         return;
                     }
 
@@ -380,11 +498,8 @@ app.registerExtension({
                     galleryDiv.style.height = `${galleryH}px`;
 
                     // Update grid columns based on zoom (scale)
-                    const baseSize = getConfigValue("thumbnail_size") || 100;
-                    const scaledSize = baseSize * scale;
+                    const scaledSize = thumbnailSize * scale;
                     galleryDiv.style.gridTemplateColumns = `repeat(auto-fill, minmax(${Math.max(20, scaledSize)}px, 1fr))`;
-
-                    requestAnimationFrame(syncGallery);
                 };
 
                 // Start the loop
